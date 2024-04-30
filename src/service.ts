@@ -9,6 +9,9 @@ import {
   VueSignalRConfig,
 } from './models';
 
+import type { IRetryPolicy } from '@microsoft/signalr'
+type RetryFunction = IRetryPolicy['nextRetryDelayInMilliseconds']
+
 export function createService({
   connection,
   // eslint-disable-next-line @typescript-eslint/no-empty-function
@@ -20,7 +23,18 @@ export function createService({
   const activeListenersSet = new Set();
 
   connection.onclose(failFn);
+  const connectionRetryFunction = (connection as any)
+    ._reconnectPolicy
+    ?.nextRetryDelayInMilliseconds
 
+  const retryFunction: RetryFunction =
+    typeof connectionRetryFunction === 'function'
+      ? connectionRetryFunction
+      : () => null
+
+  let connectionStarted = Date.now()
+  let previousRetryCount = 0
+  
   async function init() {
     try {
       await connection.start();
@@ -32,7 +46,21 @@ export function createService({
         action && action();
       }
     } catch (error) {
-      failFn(error);
+      previousRetryCount += 1
+      const reconnectDelay = retryFunction({
+        elapsedMilliseconds: Date.now() - connectionStarted,
+        retryReason:
+          error instanceof Error
+            ? error
+            : new Error('connection.start() failed'),
+        previousRetryCount
+      })
+      if (reconnectDelay !== null) {
+        await new Promise((r) => setTimeout(r, reconnectDelay))
+        //@ts-ignore
+        this.init()
+      }
+      failFn(error)
     }
   }
 
